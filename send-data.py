@@ -31,8 +31,8 @@ def init_mqtt_client():
     client.connect(MQTT_BROKER, MQTT_PORT)
     client.loop_start()
 
-def get_all_rows(folder_path):
-    all_rows = []
+def csv_row_generator(folder_path):
+    """Gera linhas dos CSVs um por um (streaming)."""
     files_to_process = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".csv")]
     for filepath in files_to_process:
         filename = os.path.basename(filepath)
@@ -40,11 +40,10 @@ def get_all_rows(folder_path):
         try:
             with open(filepath, 'r', newline='', encoding='utf-8') as csvfile:
                 csv_reader = csv.DictReader(csvfile)
-                for i, row in enumerate(csv_reader):
-                    all_rows.append((row, topic))
+                for row in csv_reader:
+                    yield row, topic
         except Exception as e:
             print(f"Erro ao ler o arquivo {filename}: {e}")
-    return all_rows
 
 def main():
     parser = argparse.ArgumentParser(description="Publica dados de arquivos CSV via MQTT a uma taxa e por um tempo especificados.")
@@ -56,30 +55,22 @@ def main():
         print(f"O diretório '{FOLDER_PATH}' não foi encontrado.")
         return
 
-    print("📊 Carregando dados dos arquivos CSV para a memória...")
-    all_messages = get_all_rows(FOLDER_PATH)
-
-    if not all_messages:
-        print("Nenhuma mensagem para processar.")
-        return
-
-    total_messages_to_send = len(all_messages)
-    print(f"Total de mensagens carregadas: {total_messages_to_send}")
-    print(f"⚡ Publicando a uma taxa de {args.rate} msg/s por {args.duration} segundos.")
+    print("📊 Preparando envio dos dados dos arquivos CSV...")
 
     init_mqtt_client()
-    
+
+    start_time = time.time()
+    messages_sent = 0
+
+    # Progress bar sem total fixo (vai atualizando dinamicamente)
     global progress_bar
-    progress_bar = tqdm(total=total_messages_to_send, desc="Progresso do envio", unit="msg")
+    progress_bar = tqdm(desc="Progresso do envio", unit="msg")
 
     try:
-        start_time = time.time()
-        messages_sent = 0
-        message_index = 0
-        
-        while time.time() - start_time < args.duration and messages_sent < total_messages_to_send:
-            row, topic = all_messages[message_index]
-            
+        for row, topic in csv_row_generator(FOLDER_PATH):
+            if time.time() - start_time >= args.duration:
+                break
+
             data_dict = {
                 "date_time": row.get("date_time"),
                 "proximity": float(row.get("proximity", 0)),
@@ -94,16 +85,14 @@ def main():
                     "amplitude": float(row.get("sound_amplitude", 0))
                 },
                 "topic": topic,
-                "startProcessingTimestamp" : int(time.time_ns() // 1_000_000)
+                "startProcessingTimestamp": int(time.time_ns() // 1_000_000)
             }
-            
+
             json_payload = json.dumps(data_dict)
             client.publish(topic, json_payload, qos=1)
-            
+
             messages_sent += 1
             progress_bar.update(1)
-
-            message_index = (message_index + 1) % total_messages_to_send
 
             time.sleep(1 / args.rate)
 
@@ -116,7 +105,7 @@ def main():
         if client:
             client.disconnect()
             client.loop_stop()
-        print("\n✅ Processo de envio concluído.")
+        print(f"\n✅ Processo de envio concluído. Total enviado: {messages_sent} mensagens.")
 
 if __name__ == "__main__":
     main()
